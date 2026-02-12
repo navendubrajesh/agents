@@ -18,9 +18,16 @@ And this is new to me, but I'm also trying out X/Twitter at [@edwarddonner](http
 
 Perhaps famous last words: but I really, truly hope that I've put together an environment that will be not too horrific to set up!
 
-- Windows people, your instructions are [here](setup/SETUP-PC.md)
-- Mac people, yours are [here](setup/SETUP-mac.md)
-- Linux people, yours are [here](setup/SETUP-linux.md)
+### Need Cursor Code Editor?
+
+If you don't have Cursor yet, install it first at:  
+https://www.cursor.com/
+
+Then follow the setup guide for your OS to open this project in Cursor and install required extensions:
+
+- Windows: [setup/SETUP-PC.md](setup/SETUP-PC.md)
+- Mac: [setup/SETUP-mac.md](setup/SETUP-mac.md)
+- Linux: [setup/SETUP-linux.md](setup/SETUP-linux.md)
 
 Any problems, please do contact me.
 
