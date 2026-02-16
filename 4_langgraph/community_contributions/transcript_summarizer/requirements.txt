@@ -8,5 +8,7 @@ google-generativeai
 gradio
 pydantic
 pydantic-settings
+scrapetube
+youtube-transcript-api
 webvtt-py
 tiktoken

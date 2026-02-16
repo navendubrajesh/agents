@@ -129,6 +129,40 @@ transcripter/
 3. **Generate Summary:** Click "Generate Summary" to process the transcript
 4. **Review Results:** View the generated summary and processing statistics
 
+## YouTube Channel Scraping + Per-Video Summaries
+
+This project now includes a CLI pipeline that can scrape videos from a channel and generate one summary per video:
+
+```bash
+python summarize_youtube_channel.py \
+  --channel-url "https://www.youtube.com/channel/UCiV0zikSWzC0nx5HFy-C3lg" \
+  --output-dir output \
+  --summary-mode auto
+```
+
+### What the pipeline does
+
+1. Scrapes all videos from the channel
+2. Tries to fetch transcript text for each video (preferred)
+3. Falls back to title + description if transcript is not available
+4. Produces:
+   - JSON report: `output/<channel_slug>_video_summaries.json`
+   - Markdown report: `output/<channel_slug>_video_summaries.md`
+
+### Useful options
+
+- `--max-videos 20` to process a subset during testing
+- `--summary-mode extractive` for local no-LLM summarization
+- `--summary-mode llm` to force LLM-only summaries
+- `--languages en,hi` to set transcript language priority
+- `--save-every 10` to checkpoint results every N videos
+
+### Notes
+
+- YouTube may block transcript requests from some cloud IPs.
+- The pipeline handles this by falling back to metadata-based summaries so processing can still complete.
+- If you run locally, transcript coverage is typically better than on cloud/server IPs.
+
 ## Configuration
 
 The application can be configured through environment variables or by creating a `.env` file in the project root:
