@@ -156,6 +156,7 @@ python summarize_youtube_channel.py \
 - `--summary-mode llm` to force LLM-only summaries
 - `--languages en,hi` to set transcript language priority
 - `--save-every 10` to checkpoint results every N videos
+- `--disable-transcripts` to summarize from title + description only (faster, useful on blocked cloud IPs)
 
 ### Notes
 

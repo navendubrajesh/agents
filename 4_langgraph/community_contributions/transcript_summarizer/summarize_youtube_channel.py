@@ -62,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="HTTP request timeout in seconds for YouTube requests (default: 20).",
     )
     parser.add_argument(
+        "--disable-transcripts",
+        action="store_true",
+        help=(
+            "Skip transcript retrieval and summarize using title + description only. "
+            "Useful when YouTube blocks transcript requests on cloud IPs."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -93,6 +101,7 @@ def main() -> None:
         summary_mode=args.summary_mode,
         preferred_languages=parse_languages(args.languages),
         request_timeout=args.request_timeout,
+        fetch_transcripts=not args.disable_transcripts,
     )
 
     output = summarizer.summarize_channel(

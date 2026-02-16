@@ -23,7 +23,6 @@ from youtube_transcript_api import (
     YouTubeTranscriptApi,
 )
 
-from .summarizer import TranscriptSummarizer
 from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -79,6 +78,7 @@ class ChannelVideo:
     url: str
     published: Optional[str] = None
     duration: Optional[str] = None
+    description_snippet: Optional[str] = None
 
 
 @dataclass
@@ -120,6 +120,7 @@ class YouTubeChannelSummarizer:
         preferred_languages: Optional[Sequence[str]] = None,
         request_timeout: int = 20,
         max_summary_sentences: int = 6,
+        fetch_transcripts: bool = True,
     ):
         self.config = config
         self.summary_mode = summary_mode.lower().strip()
@@ -129,11 +130,12 @@ class YouTubeChannelSummarizer:
         self.preferred_languages = list(preferred_languages or ["en", "hi"])
         self.request_timeout = request_timeout
         self.max_summary_sentences = max_summary_sentences
+        self.fetch_transcripts = fetch_transcripts
 
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": DEFAULT_USER_AGENT})
 
-        self._llm_summarizer: Optional[TranscriptSummarizer] = None
+        self._llm_summarizer: Optional[Any] = None
         self._llm_available = False
         self._initialize_llm_if_needed()
 
@@ -143,6 +145,8 @@ class YouTubeChannelSummarizer:
             return
 
         try:
+            from .summarizer import TranscriptSummarizer
+
             self._llm_summarizer = TranscriptSummarizer(self.config)
             health = self._llm_summarizer.check_service_health()
             self._llm_available = bool(
@@ -194,6 +198,7 @@ class YouTubeChannelSummarizer:
             title = self._extract_text(raw.get("title")) or "Untitled"
             published = self._extract_text(raw.get("publishedTimeText"))
             duration = self._extract_text(raw.get("lengthText"))
+            description_snippet = self._extract_text(raw.get("descriptionSnippet"))
             videos.append(
                 ChannelVideo(
                     video_id=video_id,
@@ -201,6 +206,7 @@ class YouTubeChannelSummarizer:
                     url=f"https://www.youtube.com/watch?v={video_id}",
                     published=published,
                     duration=duration,
+                    description_snippet=description_snippet,
                 )
             )
 
@@ -232,19 +238,24 @@ class YouTubeChannelSummarizer:
         """Summarize a single video with transcript-first fallback logic."""
         notes: List[str] = []
         transcript_text = ""
-        description = ""
+        description = (video.description_snippet or "").strip()
 
-        try:
-            player_response = self._fetch_player_response(video.video_id)
-            description = (
-                player_response.get("videoDetails", {}).get("shortDescription", "") or ""
-            ).strip()
-            transcript_text, transcript_notes = self._fetch_best_transcript(
-                video.video_id, player_response
-            )
-            notes.extend(transcript_notes)
-        except Exception as exc:
-            notes.append(f"Failed to fetch watch-page metadata: {exc}")
+        if self.fetch_transcripts:
+            try:
+                player_response = self._fetch_player_response(video.video_id)
+                watch_description = (
+                    player_response.get("videoDetails", {}).get("shortDescription", "") or ""
+                ).strip()
+                if watch_description:
+                    description = watch_description
+                transcript_text, transcript_notes = self._fetch_best_transcript(
+                    video.video_id, player_response
+                )
+                notes.extend(transcript_notes)
+            except Exception as exc:
+                notes.append(f"Failed to fetch watch-page metadata: {exc}")
+        else:
+            notes.append("Transcript fetching disabled by configuration.")
 
         if transcript_text:
             input_text = transcript_text
