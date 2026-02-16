@@ -42,6 +42,7 @@ setup(
     entry_points={
         "console_scripts": [
             "transcript-summarizer=main:main",
+            "youtube-channel-summarizer=summarize_youtube_channel:main",
         ],
     },
 )
