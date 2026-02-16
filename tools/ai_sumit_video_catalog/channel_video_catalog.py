@@ -15,6 +15,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -25,7 +26,7 @@ import requests
 DEFAULT_CHANNEL_URL = "https://www.youtube.com/channel/UCiV0zikSWzC0nx5HFy-C3lg"
 DEFAULT_OUTPUT_DIR = Path("tools/ai_sumit_video_catalog/output")
 YOUTUBE_BROWSE_API = "https://www.youtube.com/youtubei/v1/browse"
-YOUTUBE_PLAYER_API = "https://www.youtube.com/youtubei/v1/player"
+YOUTUBE_NEXT_API = "https://www.youtube.com/youtubei/v1/next"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -74,6 +75,53 @@ def safe_int(value: Any) -> int | None:
         return int(str(value).replace(",", "").strip())
     except ValueError:
         return None
+
+
+def parse_human_count(value: str) -> int | None:
+    """Parse compact counters like '1.2K views' into integers."""
+    if not value:
+        return None
+    text = str(value).upper().replace(",", "").strip()
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([KMB])?", text)
+    if not match:
+        return None
+    number = float(match.group(1))
+    suffix = match.group(2)
+    multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1)
+    return int(number * multiplier)
+
+
+def duration_text_to_seconds(duration_text: str) -> int | None:
+    """Convert 'HH:MM:SS' or 'MM:SS' style duration to seconds."""
+    if not duration_text:
+        return None
+    text = duration_text.strip()
+    if not re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", text):
+        return None
+    parts = [int(part) for part in text.split(":")]
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return minutes * 60 + seconds
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return hours * 3600 + minutes * 60 + seconds
+    return None
+
+
+def parse_published_date(date_text: str) -> str:
+    """Parse watch-page date text into ISO date format where possible."""
+    if not date_text:
+        return ""
+    clean = compact_whitespace(date_text)
+    match = re.search(r"([A-Za-z]+\s+\d{1,2},\s+\d{4})", clean)
+    if match:
+        clean = match.group(1)
+    for fmt in ("%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(clean, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return ""
 
 
 def compact_whitespace(value: str) -> str:
@@ -162,8 +210,14 @@ def parse_presented_by(title: str, description: str, fallback_author: str) -> st
         if 2 <= len(candidate) <= 80:
             return candidate
 
-    title_match = re.search(r"(?i)\bwith\s+([A-Za-z][A-Za-z .'\-]{1,60})$", title.strip())
-    if title_match:
+    title_patterns = [
+        r"(?i)\b(?:exclusive interview with|interview with|conversation with|talk with)\s+([^|,\-]{2,80})",
+        r"(?i)\bwith\s+([A-Za-z][A-Za-z .'\-]{1,60})$",
+    ]
+    for pattern in title_patterns:
+        title_match = re.search(pattern, title.strip())
+        if not title_match:
+            continue
         candidate = compact_whitespace(title_match.group(1))
         if 2 <= len(candidate) <= 80:
             return candidate
@@ -179,7 +233,8 @@ def summarize_description(description: str, title: str) -> str:
 
     skip_line_re = re.compile(
         r"(https?://|www\.|subscribe|follow|instagram|telegram|whatsapp|discord|"
-        r"contact|link|coupon|promo|referral|join now)",
+        r"contact|link|coupon|promo|referral|join now|disclaimer|video courtesy|"
+        r"podcast courtesy|copyright)",
         re.IGNORECASE,
     )
 
@@ -187,6 +242,8 @@ def summarize_description(description: str, title: str) -> str:
     for line in text.splitlines():
         clean = compact_whitespace(line)
         if not clean:
+            continue
+        if clean.startswith("#"):
             continue
         if skip_line_re.search(clean) and len(clean) < 140:
             continue
@@ -418,27 +475,111 @@ class YouTubeChannelScanner:
 
         return stubs[:max_videos] if max_videos is not None else stubs
 
+    def _find_renderer(self, payload: dict[str, Any], renderer_key: str) -> dict[str, Any]:
+        """Depth-first search for the first renderer key in payload."""
+        stack: list[Any] = [payload]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                renderer = node.get(renderer_key)
+                if isinstance(renderer, dict):
+                    return renderer
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return {}
+
+    def _extract_watch_renderers(
+        self, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Extract primary and secondary info renderers from watch-next payload."""
+        contents = (
+            payload.get("contents", {})
+            .get("twoColumnWatchNextResults", {})
+            .get("results", {})
+            .get("results", {})
+            .get("contents", [])
+        )
+        primary: dict[str, Any] = {}
+        secondary: dict[str, Any] = {}
+        for item in contents:
+            if not primary:
+                maybe_primary = item.get("videoPrimaryInfoRenderer")
+                if isinstance(maybe_primary, dict):
+                    primary = maybe_primary
+            if not secondary:
+                maybe_secondary = item.get("videoSecondaryInfoRenderer")
+                if isinstance(maybe_secondary, dict):
+                    secondary = maybe_secondary
+
+        if not primary:
+            primary = self._find_renderer(payload, "videoPrimaryInfoRenderer")
+        if not secondary:
+            secondary = self._find_renderer(payload, "videoSecondaryInfoRenderer")
+
+        return primary, secondary
+
+    def _extract_like_count(self, primary: dict[str, Any]) -> int | None:
+        """Extract like count if present in primary renderer."""
+        buttons = (
+            primary.get("videoActions", {}).get("menuRenderer", {}).get("topLevelButtons", [])
+        )
+        for button in buttons:
+            model = button.get("segmentedLikeDislikeButtonViewModel", {})
+            title = (
+                model.get("likeButtonViewModel", {})
+                .get("likeButtonViewModel", {})
+                .get("toggleButtonViewModel", {})
+                .get("toggleButtonViewModel", {})
+                .get("defaultButtonViewModel", {})
+                .get("buttonViewModel", {})
+                .get("title", "")
+            )
+            like_count = parse_human_count(title)
+            if like_count is not None:
+                return like_count
+        return None
+
     def fetch_video_details(self, video_id: str) -> dict[str, Any]:
-        """Fetch richer metadata for a single video via YouTube player API."""
+        """Fetch richer metadata for a single video via YouTube watch-next API."""
         if not self.api_key or not self.context:
             raise RuntimeError("Scanner is not initialized. Call fetch_video_stubs first.")
 
         payload = {"context": self.context, "videoId": video_id}
-        response = self._post_json(f"{YOUTUBE_PLAYER_API}?key={self.api_key}", payload)
+        response = self._post_json(f"{YOUTUBE_NEXT_API}?key={self.api_key}", payload)
+        primary, secondary = self._extract_watch_renderers(response)
 
-        details = response.get("videoDetails", {})
-        microformat = response.get("microformat", {}).get("playerMicroformatRenderer", {})
+        owner_renderer = secondary.get("owner", {}).get("videoOwnerRenderer", {})
+        description = (
+            secondary.get("attributedDescription", {}).get("content")
+            or extract_text(secondary.get("description"))
+        )
+        title = extract_text(primary.get("title"))
+        date_text = extract_text(primary.get("dateText"))
+        view_count_text = extract_text(
+            primary.get("viewCount", {}).get("videoViewCountRenderer", {}).get("viewCount")
+        ) or extract_text(
+            primary.get("viewCount", {}).get("videoViewCountRenderer", {}).get("shortViewCount")
+        )
+        subscriber_count_text = extract_text(owner_renderer.get("subscriberCountText"))
+        like_count = self._extract_like_count(primary)
+        author = extract_text(owner_renderer.get("title"))
+        is_live = "watching" in view_count_text.lower() or "streamed live" in date_text.lower()
 
         return {
-            "title": details.get("title") or "",
-            "author": details.get("author") or "",
-            "description": details.get("shortDescription") or "",
-            "view_count": safe_int(details.get("viewCount")),
-            "duration_seconds": safe_int(details.get("lengthSeconds")),
-            "publish_date": microformat.get("publishDate") or microformat.get("uploadDate") or "",
-            "category": microformat.get("category") or "",
-            "keywords": details.get("keywords") or [],
-            "is_live": bool(details.get("isLiveContent", False)),
+            "title": title,
+            "author": author,
+            "description": description,
+            "view_count": parse_human_count(view_count_text),
+            "view_count_text": view_count_text,
+            "like_count": like_count,
+            "subscriber_count_text": subscriber_count_text,
+            "duration_seconds": None,
+            "publish_date": parse_published_date(date_text),
+            "publish_date_text": date_text,
+            "category": "",
+            "keywords": [],
+            "is_live": is_live,
         }
 
 
@@ -451,6 +592,8 @@ def to_row(stub: VideoStub, details: dict[str, Any]) -> dict[str, Any]:
     summary = summarize_description(description=description, title=title)
 
     duration_seconds = details.get("duration_seconds")
+    if not isinstance(duration_seconds, int):
+        duration_seconds = duration_text_to_seconds(stub.duration_text)
     duration_minutes: float | None = None
     if isinstance(duration_seconds, int) and duration_seconds > 0:
         duration_minutes = round(duration_seconds / 60, 2)
@@ -459,12 +602,14 @@ def to_row(stub: VideoStub, details: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(keywords, list):
         keywords = []
 
-    description_excerpt = compact_whitespace(description)[:220]
-    if len(compact_whitespace(description)) > 220:
+    normalized_description = compact_whitespace(description)
+    description_excerpt = normalized_description[:220]
+    if len(normalized_description) > 220:
         description_excerpt += "..."
 
     return {
         "Date": details.get("publish_date") or "",
+        "Date (text)": details.get("publish_date_text") or "",
         "Title": title,
         "Presented by": presenter,
         "Summary": summary,
@@ -472,7 +617,9 @@ def to_row(stub: VideoStub, details: dict[str, Any]) -> dict[str, Any]:
         "Video ID": stub.video_id,
         "Duration (min)": duration_minutes if duration_minutes is not None else "",
         "Views": details.get("view_count") if details.get("view_count") is not None else "",
-        "Views (text)": stub.views_text,
+        "Views (text)": details.get("view_count_text") or stub.views_text,
+        "Likes": details.get("like_count") if details.get("like_count") is not None else "",
+        "Subscribers": details.get("subscriber_count_text") or "",
         "Published (relative)": stub.published_relative,
         "Duration (text)": stub.duration_text,
         "Category": details.get("category") or "",
